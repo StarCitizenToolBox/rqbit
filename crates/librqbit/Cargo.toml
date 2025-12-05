@@ -12,7 +12,7 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["default-tls", "http-api-client"]
+default = ["rustls-tls-webpki-roots", "http-api-client"]
 
 tokio-console = ["console-subscriber", "tokio/tracing"]
 http-api = ["axum", "tower-http"]
@@ -61,7 +61,7 @@ librqbit-core = { path = "../librqbit_core", default-features = false, version =
 librqbit-lsd = { path = "../librqbit_lsd", default-features = false, package = "librqbit-lsd", version = "0.1.0" }
 clone_to_owned = { path = "../clone_to_owned", package = "librqbit-clone-to-owned", version = "3" }
 peer_binary_protocol = { path = "../peer_binary_protocol", default-features = false, package = "librqbit-peer-protocol", version = "4.3" }
-sha1w = { path = "../sha1w", default-features = false, package = "librqbit-sha1-wrapper", version = "4.1" }
+sha1w = { path = "../sha1w", default-features = false, package = "librqbit-sha1-wrapper", version = "4.1",features = ["sha1-ring"] }
 dht = { path = "../dht", package = "librqbit-dht", default-features = false, version = "5.3.0" }
 librqbit-upnp = { path = "../upnp", version = "1" }
 upnp-serve = { path = "../upnp-serve", package = "librqbit-upnp-serve", default-features = false, version = "1", optional = true }

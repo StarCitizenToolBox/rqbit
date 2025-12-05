@@ -151,3 +151,14 @@ impl Default for WebSeedConfig {
         }
     }
 }
+
+/// File information for multi-file torrent webseed downloads.
+#[derive(Debug, Clone)]
+pub struct WebSeedFileInfo {
+    /// Relative path within the torrent.
+    pub path: String,
+    /// Offset of this file within the torrent's data stream.
+    pub offset: u64,
+    /// Length of the file.
+    pub length: u64,
+}

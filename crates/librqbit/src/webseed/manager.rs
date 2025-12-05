@@ -19,7 +19,7 @@ use librqbit_core::hash_id::Id20;
 use librqbit_core::lengths::{Lengths, ValidPieceIndex};
 
 use super::client::WebSeedClient;
-use super::{WebSeedConfig, WebSeedDownloadResult, WebSeedError, WebSeedUrl};
+use super::{WebSeedConfig, WebSeedDownloadResult, WebSeedError, WebSeedFileInfo, WebSeedUrl};
 
 /// Manages WebSeed downloads for a torrent.
 pub struct WebSeedManager {
@@ -33,8 +33,8 @@ pub struct WebSeedManager {
     piece_hashes: Arc<Vec<Id20>>,
     /// Torrent name.
     torrent_name: Option<String>,
-    /// File paths for multi-file torrents.
-    file_paths: Vec<String>,
+    /// File information for multi-file torrents.
+    file_infos: Vec<WebSeedFileInfo>,
     /// Whether this is a multi-file torrent.
     is_multi_file: bool,
     /// Configuration.
@@ -55,7 +55,7 @@ impl WebSeedManager {
         lengths: Lengths,
         piece_hashes: Vec<Id20>,
         torrent_name: Option<String>,
-        file_paths: Vec<String>,
+        file_infos: Vec<WebSeedFileInfo>,
         is_multi_file: bool,
         config: WebSeedConfig,
         cancel_token: CancellationToken,
@@ -83,7 +83,7 @@ impl WebSeedManager {
             lengths,
             piece_hashes: Arc::new(piece_hashes),
             torrent_name,
-            file_paths,
+            file_infos,
             is_multi_file,
             semaphore: Semaphore::new(effective_concurrency.max(1)),
             config,
@@ -246,7 +246,7 @@ impl WebSeedManager {
                 piece_index,
                 &self.lengths,
                 self.torrent_name.as_deref(),
-                &self.file_paths,
+                &self.file_infos,
                 self.is_multi_file,
             )
             .await

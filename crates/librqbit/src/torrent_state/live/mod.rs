@@ -272,11 +272,15 @@ impl TorrentStateLive {
                 })
                 .collect();
 
-            let file_paths: Vec<String> = paused
+            let file_infos: Vec<crate::webseed::WebSeedFileInfo> = paused
                 .metadata
                 .file_infos
                 .iter()
-                .map(|fi| fi.relative_filename.to_string_lossy().to_string())
+                .map(|fi| crate::webseed::WebSeedFileInfo {
+                    path: fi.relative_filename.to_string_lossy().to_string(),
+                    offset: fi.offset_in_torrent,
+                    length: fi.len,
+                })
                 .collect();
 
             let is_multi_file = paused.metadata.file_infos.len() > 1;
@@ -288,7 +292,7 @@ impl TorrentStateLive {
                 lengths,
                 piece_hashes,
                 torrent_name,
-                file_paths,
+                file_infos,
                 is_multi_file,
                 crate::webseed::WebSeedConfig::default(),
                 cancellation_token.clone(),

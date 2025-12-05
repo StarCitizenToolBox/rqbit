@@ -5,14 +5,14 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use reqwest::{Client, StatusCode};
 use tracing::{debug, trace, warn};
 use url::Url;
 
 use librqbit_core::lengths::{Lengths, ValidPieceIndex};
 
-use super::{WebSeedError, WebSeedUrl};
+use super::{WebSeedError, WebSeedFileInfo, WebSeedUrl};
 
 /// HTTP client for WebSeed downloads.
 #[derive(Clone)]
@@ -143,7 +143,7 @@ impl WebSeedClient {
         piece_index: ValidPieceIndex,
         lengths: &Lengths,
         torrent_name: Option<&str>,
-        file_paths: &[String],
+        file_infos: &[WebSeedFileInfo],
         is_multi_file: bool,
     ) -> Result<Bytes, WebSeedError> {
         if webseed_url.disabled {
@@ -153,12 +153,12 @@ impl WebSeedClient {
         let piece_offset = lengths.piece_offset(piece_index);
         let piece_length = lengths.piece_length(piece_index) as u64;
 
-        if !is_multi_file || file_paths.len() == 1 {
+        if !is_multi_file || file_infos.len() == 1 {
             // Single file torrent - simple case
             let url = Self::build_url(
                 &webseed_url.url,
                 torrent_name,
-                file_paths.first().map(|s| s.as_str()),
+                file_infos.first().map(|f| f.path.as_str()),
                 is_multi_file,
             )?;
 
@@ -166,36 +166,83 @@ impl WebSeedClient {
                 .await
         } else {
             // Multi-file torrent - piece may span multiple files
-            // This is more complex and requires knowing file boundaries
             self.download_piece_multi_file(
                 webseed_url,
                 piece_offset,
                 piece_length,
                 torrent_name,
-                file_paths,
+                file_infos,
             )
             .await
         }
     }
 
     /// Download a piece that spans multiple files.
+    ///
+    /// BEP-19 specifies that for multi-file torrents, each file must be
+    /// downloaded separately using its path relative to the torrent name.
     async fn download_piece_multi_file(
         &self,
         webseed_url: &WebSeedUrl,
         piece_offset: u64,
         piece_length: u64,
         torrent_name: Option<&str>,
-        _file_paths: &[String],
+        file_infos: &[WebSeedFileInfo],
     ) -> Result<Bytes, WebSeedError> {
-        // For now, we'll use a simplified approach that downloads from the first matching file
-        // A full implementation would need file offset information to properly span files
+        let piece_end = piece_offset + piece_length;
+        let mut result = BytesMut::with_capacity(piece_length as usize);
 
-        // Build URL with just the torrent name for multi-file
-        let url = Self::build_url(&webseed_url.url, torrent_name, None, true)?;
+        // Find all files that overlap with this piece
+        for file_info in file_infos {
+            let file_start = file_info.offset;
+            let file_end = file_start + file_info.length;
 
-        // Try to download the range - some servers handle multi-file torrents as a single stream
-        self.download_range(&url, piece_offset..piece_offset + piece_length)
-            .await
+            // Skip files that don't overlap with this piece
+            if file_end <= piece_offset || file_start >= piece_end {
+                continue;
+            }
+
+            // Calculate the byte range within this file
+            let range_start_in_torrent = piece_offset.max(file_start);
+            let range_end_in_torrent = piece_end.min(file_end);
+
+            // Convert to file-relative offsets
+            let file_range_start = range_start_in_torrent - file_start;
+            let file_range_end = range_end_in_torrent - file_start;
+
+            // Build URL for this specific file
+            let url = Self::build_url(
+                &webseed_url.url,
+                torrent_name,
+                Some(&file_info.path),
+                true,
+            )?;
+
+            trace!(
+                url = %url,
+                file_path = %file_info.path,
+                file_range = %format!("{}-{}", file_range_start, file_range_end),
+                "downloading file range for multi-file piece"
+            );
+
+            // Download the range from this file
+            let bytes = self
+                .download_range(&url, file_range_start..file_range_end)
+                .await?;
+
+            result.extend_from_slice(&bytes);
+        }
+
+        if result.len() != piece_length as usize {
+            warn!(
+                expected = piece_length,
+                got = result.len(),
+                "multi-file piece download size mismatch"
+            );
+            return Err(WebSeedError::InvalidByteRange);
+        }
+
+        Ok(result.freeze())
     }
 
     /// Check if a WebSeed URL is valid and responding.
