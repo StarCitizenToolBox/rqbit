@@ -138,9 +138,10 @@ impl AdaptiveConcurrencyController {
         let errors = self.consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
         let current = self.current_concurrency.load(Ordering::Relaxed);
         
-        // Check if we should disable (at concurrency=1 with too many errors)
         if current == 1 && errors >= self.disable_threshold {
-            println!("[webseed] Adaptive concurrency: DISABLE triggered (errors={} at concurrency=1)", errors);
+            if errors == self.disable_threshold {
+                println!("[webseed] Adaptive concurrency: DISABLE triggered (errors={} at concurrency=1)", errors);
+            }
             return (false, true);
         }
         
