@@ -10,7 +10,7 @@ mod client;
 mod manager;
 
 pub use client::WebSeedClient;
-pub use manager::{WebSeedManager, WebSeedStatus};
+pub use manager::{AdaptiveConcurrencyController, WebSeedManager, WebSeedStatus};
 
 use librqbit_core::lengths::ValidPieceIndex;
 use std::future::Future;
@@ -150,6 +150,14 @@ pub struct WebSeedConfig {
     pub max_errors_before_disable: u32,
     /// Cooldown period in seconds before retrying a disabled webseed.
     pub disable_cooldown_secs: u64,
+    /// Enable adaptive concurrency control.
+    /// When enabled, concurrency starts at 1 and gradually increases on success,
+    /// decreases on errors. This helps handle network fluctuations gracefully.
+    pub adaptive_concurrency: bool,
+    /// Number of consecutive successes needed to increase concurrency by 1.
+    pub adaptive_increase_threshold: u32,
+    /// Number of consecutive errors to decrease concurrency by half.
+    pub adaptive_decrease_threshold: u32,
 }
 
 impl Default for WebSeedConfig {
@@ -162,6 +170,9 @@ impl Default for WebSeedConfig {
             min_gap_for_webseed: 10,
             max_errors_before_disable: 10,
             disable_cooldown_secs: 1800,
+            adaptive_concurrency: true,
+            adaptive_increase_threshold: 5,
+            adaptive_decrease_threshold: 2,
         }
     }
 }
