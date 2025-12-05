@@ -145,9 +145,8 @@ impl AdaptiveConcurrencyController {
                 Ordering::SeqCst, 
                 Ordering::Relaxed
             ).is_ok() {
-                // Reset both counters after adjustment
+                // Reset success counter after adjustment
                 self.consecutive_successes.store(0, Ordering::Relaxed);
-                self.consecutive_errors.store(0, Ordering::Relaxed);
                 println!("[webseed] Adaptive concurrency INCREASED: {} -> {} (after {} consecutive successes)", 
                     current, new_concurrency, self.increase_threshold);
                 return true;
@@ -189,8 +188,7 @@ impl AdaptiveConcurrencyController {
                 Ordering::SeqCst,
                 Ordering::Relaxed
             ).is_ok() {
-                // Reset both counters after adjustment
-                self.consecutive_successes.store(0, Ordering::Relaxed);
+                // Reset error counter after adjustment
                 self.consecutive_errors.store(0, Ordering::Relaxed);
                 println!("[webseed] Adaptive concurrency DECREASED: {} -> {} (after {} consecutive errors)", 
                     current, new_concurrency, self.decrease_threshold);
