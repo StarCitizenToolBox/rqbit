@@ -5,7 +5,8 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use bytes::Bytes;
 use parking_lot::RwLock;
@@ -28,7 +29,6 @@ use super::{BytesReceivedCallback, RateLimitCallback, WebSeedConfig, WebSeedDown
 /// - On success: gradually increase concurrency after N consecutive successes
 /// - On error: immediately reduce concurrency (halve it)
 /// - At concurrency=1 with repeated errors: trigger temporary disable
-#[derive(Debug)]
 pub struct AdaptiveConcurrencyController {
     /// Current effective concurrency limit
     current_concurrency: AtomicUsize,
@@ -46,9 +46,18 @@ pub struct AdaptiveConcurrencyController {
     decrease_threshold: u32,
     /// Errors at concurrency=1 before disabling
     disable_threshold: u32,
+    /// Last concurrency adjustment time (epoch millis for atomic storage)
+    last_adjustment_millis: AtomicU64,
+    /// Creation instant for calculating elapsed time
+    start_instant: Instant,
+    /// Debounce interval in milliseconds
+    debounce_millis: u64,
 }
 
 impl AdaptiveConcurrencyController {
+    /// Debounce interval for error counting: 10 seconds
+    const ERROR_DEBOUNCE_MILLIS: u64 = 10_000;
+    
     pub fn new(max_concurrency: usize, increase_threshold: u32, decrease_threshold: u32, disable_threshold: u32) -> Self {
         // Start with half of the target concurrency (at least 1)
         let initial = (max_concurrency / 2).max(1);
@@ -62,7 +71,23 @@ impl AdaptiveConcurrencyController {
             increase_threshold,
             decrease_threshold,
             disable_threshold,
+            last_adjustment_millis: AtomicU64::new(0),
+            start_instant: Instant::now(),
+            debounce_millis: Self::ERROR_DEBOUNCE_MILLIS,
         }
+    }
+    
+    /// Check if debounce period has passed since last error record
+    fn can_record_error(&self) -> bool {
+        let now_millis = self.start_instant.elapsed().as_millis() as u64;
+        let last = self.last_adjustment_millis.load(Ordering::Relaxed);
+        now_millis.saturating_sub(last) >= self.debounce_millis
+    }
+    
+    /// Mark the current time as the last error record time
+    fn mark_error_recorded(&self) {
+        let now_millis = self.start_instant.elapsed().as_millis() as u64;
+        self.last_adjustment_millis.store(now_millis, Ordering::Relaxed);
     }
     
     /// Get current concurrency level
@@ -105,7 +130,7 @@ impl AdaptiveConcurrencyController {
     /// Record a successful download
     /// Returns true if concurrency was increased
     pub fn record_success(&self) -> bool {
-        // Reset error counter
+        // Reset error counter on success
         self.consecutive_errors.store(0, Ordering::Relaxed);
         
         let successes = self.consecutive_successes.fetch_add(1, Ordering::Relaxed) + 1;
@@ -120,7 +145,9 @@ impl AdaptiveConcurrencyController {
                 Ordering::SeqCst, 
                 Ordering::Relaxed
             ).is_ok() {
+                // Reset both counters after adjustment
                 self.consecutive_successes.store(0, Ordering::Relaxed);
+                self.consecutive_errors.store(0, Ordering::Relaxed);
                 println!("[webseed] Adaptive concurrency INCREASED: {} -> {} (after {} consecutive successes)", 
                     current, new_concurrency, self.increase_threshold);
                 return true;
@@ -132,7 +159,13 @@ impl AdaptiveConcurrencyController {
     /// Record an error
     /// Returns (concurrency_decreased, should_disable)
     pub fn record_error(&self) -> (bool, bool) {
-        // Reset success counter
+        // Debounce: only count one error per 10 seconds to avoid all threads failing at once
+        if !self.can_record_error() {
+            return (false, false);
+        }
+        self.mark_error_recorded();
+        
+        // Reset success counter on error
         self.consecutive_successes.store(0, Ordering::Relaxed);
         
         let errors = self.consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
@@ -156,6 +189,8 @@ impl AdaptiveConcurrencyController {
                 Ordering::SeqCst,
                 Ordering::Relaxed
             ).is_ok() {
+                // Reset both counters after adjustment
+                self.consecutive_successes.store(0, Ordering::Relaxed);
                 self.consecutive_errors.store(0, Ordering::Relaxed);
                 println!("[webseed] Adaptive concurrency DECREASED: {} -> {} (after {} consecutive errors)", 
                     current, new_concurrency, self.decrease_threshold);
@@ -173,9 +208,23 @@ impl AdaptiveConcurrencyController {
         // Reset concurrency to half of max (at least 1)
         let initial = (self.max_concurrency / 2).max(1);
         let current = self.current_concurrency.swap(initial, Ordering::SeqCst);
+        // Also reset debounce timer
+        self.mark_error_recorded();
         if current != initial {
             println!("[webseed] Adaptive concurrency RESET: {} -> {}", current, initial);
         }
+    }
+}
+
+impl std::fmt::Debug for AdaptiveConcurrencyController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdaptiveConcurrencyController")
+            .field("current_concurrency", &self.current_concurrency.load(Ordering::Relaxed))
+            .field("active_downloads", &self.active_downloads.load(Ordering::Relaxed))
+            .field("max_concurrency", &self.max_concurrency)
+            .field("consecutive_successes", &self.consecutive_successes.load(Ordering::Relaxed))
+            .field("consecutive_errors", &self.consecutive_errors.load(Ordering::Relaxed))
+            .finish()
     }
 }
 
