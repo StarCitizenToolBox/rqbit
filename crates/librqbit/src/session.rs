@@ -153,6 +153,8 @@ pub struct Session {
     // Feature flags
     #[cfg(feature = "disable-upload")]
     _disable_upload: bool,
+    pub ipv4_only: bool,
+    pub peer_limit: Option<usize>,
 }
 
 async fn torrent_from_url(
@@ -281,6 +283,9 @@ pub struct AddTorrentOptions {
 
     /// Initial peers to start of with.
     pub initial_peers: Option<Vec<SocketAddr>>,
+
+    /// Max concurrent connected peers.
+    pub peer_limit: Option<usize>,
 
     /// This is used to restore the session from serialized state.
     pub preferred_id: Option<usize>,
@@ -454,6 +459,9 @@ pub struct SessionOptions {
     // The list of tracker URLs to always use for each torrent.
     pub trackers: HashSet<url::Url>,
 
+    /// Default peer limit per torrent.
+    pub peer_limit: Option<usize>,
+
     #[cfg(feature = "disable-upload")]
     pub disable_upload: bool,
 
@@ -462,6 +470,9 @@ pub struct SessionOptions {
 
     /// WebSeed configuration for HTTP seeding (BEP-19).
     pub webseed_config: Option<crate::webseed::WebSeedConfig>,
+
+    /// Force IPv4 only.
+    pub ipv4_only: bool,
 }
 
 fn torrent_file_from_info_bytes(info_bytes: &[u8], trackers: &[url::Url]) -> anyhow::Result<Bytes> {
@@ -678,6 +689,7 @@ impl Session {
                     socks_proxy_config: proxy_config,
                     utp_socket: listen_result.as_ref().and_then(|l| l.utp_socket.clone()),
                     bind_device: bind_device.clone(),
+                    ipv4_only: opts.ipv4_only,
                 })
                 .await
                 .context("error creating stream connector")?,
@@ -749,8 +761,10 @@ impl Session {
                 )),
                 udp_tracker_client,
                 ratelimits: Limits::new(opts.ratelimits),
+                ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,
+                peer_limit: opts.peer_limit,
 
                 #[cfg(feature = "disable-upload")]
                 _disable_upload: opts.disable_upload,
@@ -949,8 +963,9 @@ impl Session {
                     }
                 },
                 Some(Ok((live, checked))) = futs.next(), if !futs.is_empty() => {
+                    let (addr, kind) = (checked.addr, checked.kind);
                     if let Err(e) = live.add_incoming_peer(checked) {
-                        warn!("error handing over incoming connection: {e:#}");
+                        warn!(?addr, ?kind, "error handing over incoming connection: {e:#}");
                     }
                 },
             }
@@ -1100,26 +1115,28 @@ impl Session {
                         .meta
                         .url_list
                         .iter_urls()
-                        .filter_map(|url_str| {
-                            match url::Url::parse(&url_str) {
-                                Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {
-                                    debug!(url = %url, "parsed webseed URL");
-                                    Some(url)
-                                }
-                                Ok(url) => {
-                                    debug!(url = %url, "ignoring non-HTTP webseed URL");
-                                    None
-                                }
-                                Err(e) => {
-                                    warn!(url = %url_str, error = %e, "failed to parse webseed URL");
-                                    None
-                                }
+                        .filter_map(|url_str| match url::Url::parse(&url_str) {
+                            Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {
+                                debug!(url = %url, "parsed webseed URL");
+                                Some(url)
+                            }
+                            Ok(url) => {
+                                debug!(url = %url, "ignoring non-HTTP webseed URL");
+                                None
+                            }
+                            Err(e) => {
+                                warn!(url = %url_str, error = %e, "failed to parse webseed URL");
+                                None
                             }
                         })
                         .collect();
 
                     if !webseed_urls.is_empty() {
-                        info!(count = webseed_urls.len(), "found {} webseed URLs", webseed_urls.len());
+                        info!(
+                            count = webseed_urls.len(),
+                            "found {} webseed URLs",
+                            webseed_urls.len()
+                        );
                     }
 
                     InternalAddResult {
@@ -1328,6 +1345,7 @@ impl Session {
                     disk_write_queue: self.disk_write_tx.clone(),
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
+                    peer_limit: opts.peer_limit.or(self.peer_limit),
                     #[cfg(feature = "disable-upload")]
                     _disable_upload: self._disable_upload,
                 },

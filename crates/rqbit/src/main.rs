@@ -132,6 +132,10 @@ struct Opts {
     #[arg(long = "peer-read-write-timeout" , value_parser = parse_duration::parse, default_value="10s", env="RQBIT_PEER_READ_WRITE_TIMEOUT")]
     peer_read_write_timeout: Duration,
 
+    /// The maximum number of connected peers per torrent.
+    #[arg(long = "peer-limit", env = "RQBIT_PEER_LIMIT")]
+    peer_limit: Option<usize>,
+
     /// How many threads to spawn for the executor.
     #[arg(short = 't', long, env = "RQBIT_RUNTIME_WORKER_THREADS")]
     worker_threads: Option<usize>,
@@ -160,6 +164,12 @@ struct Opts {
     #[arg(long = "listen-port", env = "RQBIT_LISTEN_PORT")]
     listen_port: Option<u16>,
 
+    /// The port to advertise to trackers and DHT.
+    ///
+    /// If not set, will be the same as listen-port.
+    #[arg(long = "announce-port", env = "RQBIT_ANNOUNCE_PORT")]
+    announce_port: Option<u16>,
+
     /// What's the IP to listen on. Default is to listen on all interfaces on IPv4 and IPv6.
     #[arg(long = "listen-ip", default_value = "::", env = "RQBIT_LISTEN_IP")]
     listen_ip: IpAddr,
@@ -182,13 +192,16 @@ struct Opts {
         env = "RQBIT_UPNP_SERVER_FRIENDLY_NAME"
     )]
     upnp_server_friendly_name: Option<String>,
-
     /// What network device to bind to for DHT, BT-UDP, BT-TCP, trackers and LSD.
     /// On OSX will use IP(V6)_BOUND_IF, on Linux will use SO_BINDTODEVICE.
     ///
     /// Not supported on Windows (will error if you try to use it).
     #[arg(long = "bind-device", env = "RQBIT_BIND_DEVICE")]
     bind_device_name: Option<String>,
+
+    /// Force IPv4 only.
+    #[arg(long = "ipv4-only", env = "RQBIT_IPV4_ONLY")]
+    ipv4_only: bool,
 
     #[command(subcommand)]
     subcommand: SubCommand,
@@ -278,23 +291,43 @@ struct Opts {
     disable_trackers: bool,
 
     /// Maximum concurrent webseed requests per source (default: 2)
-    #[arg(long = "webseed-max-per-source", default_value = "2", env = "RQBIT_WEBSEED_MAX_PER_SOURCE")]
+    #[arg(
+        long = "webseed-max-per-source",
+        default_value = "2",
+        env = "RQBIT_WEBSEED_MAX_PER_SOURCE"
+    )]
     webseed_max_per_source: usize,
 
     /// Maximum total concurrent webseed requests across all sources (default: 8)
-    #[arg(long = "webseed-max-total", default_value = "8", env = "RQBIT_WEBSEED_MAX_TOTAL")]
+    #[arg(
+        long = "webseed-max-total",
+        default_value = "8",
+        env = "RQBIT_WEBSEED_MAX_TOTAL"
+    )]
     webseed_max_total: usize,
 
     /// Webseed request timeout in seconds (default: 30)
-    #[arg(long = "webseed-timeout", default_value = "30", env = "RQBIT_WEBSEED_TIMEOUT")]
+    #[arg(
+        long = "webseed-timeout",
+        default_value = "30",
+        env = "RQBIT_WEBSEED_TIMEOUT"
+    )]
     webseed_timeout_secs: u64,
 
     /// Maximum consecutive errors before disabling a webseed source (default: 5)
-    #[arg(long = "webseed-max-errors", default_value = "5", env = "RQBIT_WEBSEED_MAX_ERRORS")]
+    #[arg(
+        long = "webseed-max-errors",
+        default_value = "5",
+        env = "RQBIT_WEBSEED_MAX_ERRORS"
+    )]
     webseed_max_errors: u32,
 
     /// Cooldown period in minutes before retrying a disabled webseed (default: 10)
-    #[arg(long = "webseed-cooldown-mins", default_value = "10", env = "RQBIT_WEBSEED_COOLDOWN_MINS")]
+    #[arg(
+        long = "webseed-cooldown-mins",
+        default_value = "10",
+        env = "RQBIT_WEBSEED_COOLDOWN_MINS"
+    )]
     webseed_cooldown_mins: u64,
 
     /// Custom HTTP User-Agent header for WebSeed requests
@@ -565,6 +598,8 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
         mode,
         listen_addr: (opts.listen_ip, opts.listen_port.unwrap_or(0)).into(),
         enable_upnp_port_forwarding: !opts.disable_upnp_port_forward,
+        announce_port: opts.announce_port,
+        ipv4_only: opts.ipv4_only,
         ..Default::default()
     });
 
@@ -634,7 +669,9 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
             user_agent: opts.webseed_user_agent.clone(),
             ..Default::default()
         }),
+        peer_limit: opts.peer_limit,
         runtime_worker_threads: Some(opts.max_blocking_threads as usize),
+        ipv4_only: opts.ipv4_only,
     };
 
     #[allow(clippy::needless_update)]
