@@ -4,7 +4,8 @@ use bytes::Bytes;
 use clone_to_owned::CloneToOwned;
 use encoding_rs::Encoding;
 use itertools::Either;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize as DeserializeDerive, Serialize as SerializeDerive};
 use std::{borrow::Cow, collections::HashSet, iter::once, path::PathBuf};
 use tracing::debug;
 
@@ -43,7 +44,7 @@ fn is_false(b: &bool) -> bool {
 }
 
 /// A parsed .torrent file.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(SerializeDerive, DeserializeDerive, Debug, Clone)]
 pub struct TorrentMetaV1<BufType> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub announce: Option<BufType>,
@@ -199,7 +200,7 @@ impl<BufType> TorrentMetaV1<BufType> {
 }
 
 /// Main torrent information, shared by .torrent files and magnet link contents.
-#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, SerializeDerive, DeserializeDerive, Debug, Clone, PartialEq, Eq)]
 pub struct TorrentMetaV1Info<BufType> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<BufType>,
@@ -307,7 +308,7 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, Copy)]
+#[derive(SerializeDerive, DeserializeDerive, Default, Debug, Clone, Copy)]
 pub struct FileDetailsAttrs {
     pub symlink: bool,
     pub hidden: bool,
@@ -544,7 +545,7 @@ const fn none<T>() -> Option<T> {
     None
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(DeserializeDerive, SerializeDerive, Debug, Clone, PartialEq, Eq)]
 pub struct TorrentMetaV1File<BufType> {
     pub length: u64,
     pub path: Vec<BufType>,
