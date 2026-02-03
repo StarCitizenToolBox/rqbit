@@ -20,33 +20,20 @@ pub struct ReadBuf {
     len: usize,
 }
 
-/// Advance by N bytes
+/// Advance by N bytes. A macro so that existing field-level
+/// borrows are understood by the borrow checker.
 macro_rules! advance {
     ($self:expr, $len:expr) => {
-        $self.len -= $len;
+        $self.len = $self.len.saturating_sub($len);
         $self.start = ($self.start + $len) % BUFLEN;
     };
 }
 
-/// Convert into 2 slices (as ranges).
-macro_rules! as_slice_ranges {
-    ($self:expr) => {{
-        const BUFLEN: usize = crate::read_buf::BUFLEN;
-        // These .min() calls are for asm to be branchless and the code panicless.
-        let len = $self.len.min(BUFLEN);
-        let start = $self.start.min(BUFLEN);
-
-        let first_len = len.min(BUFLEN - start);
-        let first = start..start + first_len;
-        let second = 0..len.saturating_sub(first_len);
-        (first, second)
-    }};
-}
-
-/// Convert into 2 slices
+/// Convert readbuf into 2 slices. A macro so that field-level
+/// borrows are understood by the borrow checker.
 macro_rules! as_slices {
     ($self:expr) => {{
-        let (first, second) = as_slice_ranges!($self);
+        let (first, second) = $self.as_slice_ranges();
         (&$self.buf[first], &$self.buf[second])
     }};
 }
@@ -78,7 +65,7 @@ impl ReadBuf {
         }
         let (h, size) =
             Handshake::deserialize(&self.buf[..self.len]).map_err(Error::DeserializeHandshake)?;
-        advance!(self, size);
+        self.advance(size);
         Ok(h)
     }
 
@@ -113,7 +100,18 @@ impl ReadBuf {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// Convert into 2 slices (as ranges).
+    fn as_slice_ranges(&self) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        // These .min() calls are for asm to be branchless and the code panicless.
+        let len = self.len.min(BUFLEN);
+        let start = self.start.min(BUFLEN);
+
+        let first_len = len.min(BUFLEN - start);
+        let first = start..start + first_len;
+        let second = 0..len.saturating_sub(first_len);
+        (first, second)
+    }
+
     fn advance(&mut self, len: usize) {
         advance!(self, len);
     }
@@ -140,22 +138,27 @@ impl ReadBuf {
     }
 
     /// Read a message into the buffer, try to deserialize it and call the callback on it.
-    pub async fn read_message<'a>(
-        &'a mut self,
+    pub async fn read_message(
+        &mut self,
         conn: &mut BoxAsyncReadVectored,
         timeout: Duration,
-    ) -> Result<Message<'a>> {
+    ) -> Result<Message<'_>> {
         loop {
-            let err: MessageDeserializeError = {
-                // The borrow checker doesn't understand our early return of msg in case it
-                // was successfully deserialized.
+            let err = {
+                // A workaround for borrow-checker not understanding early returns.
                 //
-                // Safety: we aren't having multiple &mut borrows at any one place, i.e. not using
-                // both "this" and "self" in this block. We aren't doing anything inherently unsafe
-                // either. When this block is over, &mut self is no longer borrowed.
-                // So this should be UB-free.
-                let this: &'a mut Self = unsafe { &mut *(self as *mut Self) };
-
+                // A stacked reborrow of self. After this block we either return from
+                // the function, or the block returns an owned error.
+                //
+                // Safety: there's nothing inherently unsafe here, this is just a
+                // borrow checker workaround. However to ensure we respect aliasing
+                // rules (&mut references are exclusive), there's a miri test below.
+                //
+                // In this case, 2 &mut references DO exist lexically, but in reality the
+                // latter one is a reborrow that ends with the block.
+                //
+                // Run with `cargo +nightly miri test -p librqbit --features miri test_read_buf_miri -- --nocapture --ignore`
+                let this = unsafe { &mut *(self as *mut Self) };
                 let (first, second) = as_slices!(this);
                 match Message::deserialize(first, second) {
                     Ok((msg, size)) => {
@@ -167,13 +170,12 @@ impl ReadBuf {
             };
 
             match err {
-                ne @ MessageDeserializeError::NotEnoughData(mut need_additional_bytes, ..) => {
+                MessageDeserializeError::NotEnoughData(mut need_additional_bytes, ..) => {
                     while need_additional_bytes > 0 {
                         if self.is_full() {
                             return Err(Error::ReadBufFull {
                                 #[allow(clippy::cast_possible_truncation)]
                                 need_additional_bytes: need_additional_bytes as u16,
-                                last_error: ne,
                             });
                         }
                         let size = with_timeout(
@@ -194,7 +196,7 @@ impl ReadBuf {
                     self.make_contiguous()?;
                     continue;
                 }
-                other => return Err(other.into()),
+                e => return Err(Error::Deserialize(e)),
             }
         }
     }
@@ -202,42 +204,44 @@ impl ReadBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, time::Duration};
-
     use librqbit_core::constants::CHUNK_SIZE;
     use peer_binary_protocol::{
-        MAX_MSG_LEN, Message,
+        MAX_MSG_LEN, Message, Piece,
         extended::{
             ExtendedMessage, PeerExtendedMessageIds,
             ut_metadata::{UtMetadata, UtMetadataData},
         },
     };
-    use tokio::io::AsyncWriteExt;
+    use std::{net::Ipv4Addr, task::Poll, time::Duration};
+    use tokio::io::{AsyncRead, AsyncWriteExt};
 
-    use crate::{tests::test_util::setup_test_logging, type_aliases::BoxAsyncReadVectored};
+    use crate::{
+        tests::test_util::setup_test_logging, type_aliases::BoxAsyncReadVectored,
+        vectored_traits::AsyncReadVectored,
+    };
 
     use super::{BUFLEN, ReadBuf};
 
     #[test]
     fn test_ringbuf_ranges() {
         let mut b = ReadBuf::new();
-        assert_eq!(as_slice_ranges!(b), (0..0, 0..0));
+        assert_eq!(b.as_slice_ranges(), (0..0, 0..0));
 
         b.start = 10;
         b.len = 10;
-        assert_eq!(as_slice_ranges!(b), (10..20, 0..0));
+        assert_eq!(b.as_slice_ranges(), (10..20, 0..0));
 
         b.start = BUFLEN - 100;
         b.len = 100;
-        assert_eq!(as_slice_ranges!(b), (BUFLEN - 100..BUFLEN, 0..0));
+        assert_eq!(b.as_slice_ranges(), (BUFLEN - 100..BUFLEN, 0..0));
 
         b.start = BUFLEN - 100;
         b.len = 120;
-        assert_eq!(as_slice_ranges!(b), (BUFLEN - 100..BUFLEN, 0..20));
+        assert_eq!(b.as_slice_ranges(), (BUFLEN - 100..BUFLEN, 0..20));
 
         b.start = BUFLEN - 100;
         b.len = BUFLEN;
-        assert_eq!(as_slice_ranges!(b), (BUFLEN - 100..BUFLEN, 0..BUFLEN - 100));
+        assert_eq!(b.as_slice_ranges(), (BUFLEN - 100..BUFLEN, 0..BUFLEN - 100));
     }
 
     #[test]
@@ -246,15 +250,15 @@ mod tests {
 
         b.start = 10;
         b.len = 10;
-        assert_eq!(as_slice_ranges!(b), (10..20, 0..0));
+        assert_eq!(b.as_slice_ranges(), (10..20, 0..0));
         b.advance(5);
-        assert_eq!(as_slice_ranges!(b), (15..20, 0..0));
+        assert_eq!(b.as_slice_ranges(), (15..20, 0..0));
 
         b.start = BUFLEN - 5;
         b.len = 10;
-        assert_eq!(as_slice_ranges!(b), (BUFLEN - 5..BUFLEN, 0..5));
+        assert_eq!(b.as_slice_ranges(), (BUFLEN - 5..BUFLEN, 0..5));
         b.advance(5);
-        assert_eq!(as_slice_ranges!(b), (0..5, 0..0));
+        assert_eq!(b.as_slice_ranges(), (0..5, 0..0));
     }
 
     #[test]
@@ -399,5 +403,69 @@ mod tests {
         };
 
         tokio::join!(reader, writer);
+    }
+
+    /// A test to prove that unsafe usage in read_buf is not UB.
+    #[test]
+    #[ignore = "run with --features=miri only, doesn't work with tokio"]
+    fn test_read_buf_miri() {
+        struct BufWrap(std::vec::IntoIter<u8>);
+        impl AsyncRead for BufWrap {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                unimplemented!("don't need this")
+            }
+        }
+
+        impl AsyncReadVectored for BufWrap {
+            fn poll_read_vectored(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                vec: &mut [std::io::IoSliceMut<'_>],
+            ) -> Poll<std::io::Result<usize>> {
+                // Yield one byte at a time to ensure that all code paths are executed
+                // (both NotEnoughData and Ok).
+                let this = self.get_mut();
+                let byte = match this.0.next() {
+                    Some(byte) => byte,
+                    None => return Poll::Ready(Ok(0)),
+                };
+                let target = vec.iter_mut().find(|s| !s.is_empty()).unwrap();
+                target[0] = byte;
+                Poll::Ready(Ok(1))
+            }
+        }
+
+        let mut rb = ReadBuf::new();
+        rb.start = BUFLEN - 15;
+
+        let mut src = {
+            let mut buf = vec![0u8; 64];
+            let piece = Message::Piece(Piece::from_data(42, 43, b"hello"));
+            let len = piece.serialize(&mut buf, &|| Default::default()).unwrap();
+            buf.truncate(len);
+            Box::new(BufWrap(buf.into_iter())) as BoxAsyncReadVectored
+        };
+
+        pollster::block_on(async {
+            let msg = rb.read_message(&mut src, Duration::ZERO).await.unwrap();
+            match msg {
+                Message::Piece(p) => {
+                    assert_eq!(p.index, 42);
+                    assert_eq!(p.begin, 43);
+                    assert_eq!(p.data(), (b"he".as_slice(), b"llo".as_slice()));
+                }
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                rb.read_message(&mut src, Duration::ZERO)
+                    .await
+                    .expect_err("expected error"),
+                crate::Error::PeerDisconnected,
+            ));
+        })
     }
 }

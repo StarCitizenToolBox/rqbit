@@ -38,7 +38,7 @@ use crate::{
         ManagedTorrentHandle, ManagedTorrentLocked, ManagedTorrentOptions, ManagedTorrentState,
         TorrentMetadata, TorrentStateLive, initializing::TorrentStateInitializing,
     },
-    type_aliases::{BoxAsyncReadVectored, BoxAsyncWrite, DiskWorkQueueSender, PeerStream},
+    type_aliases::{BoxAsyncReadVectored, BoxAsyncWrite, PeerStream},
 };
 use anyhow::{Context, bail};
 use arc_swap::ArcSwapOption;
@@ -55,7 +55,6 @@ use futures::{
 use http::StatusCode;
 use itertools::Itertools;
 use librqbit_core::{
-    constants::CHUNK_SIZE,
     crate_version,
     directories::get_configuration_directory,
     magnet::Magnet,
@@ -131,7 +130,6 @@ pub struct Session {
     peer_opts: PeerConnectionOptions,
     default_storage_factory: Option<BoxStorageFactory>,
     persistence: Option<Arc<dyn SessionPersistenceStore>>,
-    disk_write_tx: Option<DiskWorkQueueSender>,
     trackers: HashSet<url::Url>,
 
     lsd: Option<LocalServiceDiscovery>,
@@ -150,6 +148,8 @@ pub struct Session {
     // Feature flags
     #[cfg(feature = "disable-upload")]
     _disable_upload: bool,
+    pub ipv4_only: bool,
+    pub peer_limit: Option<usize>,
 }
 
 async fn torrent_from_url(
@@ -279,15 +279,14 @@ pub struct AddTorrentOptions {
     /// Initial peers to start of with.
     pub initial_peers: Option<Vec<SocketAddr>>,
 
+    /// Max concurrent connected peers.
+    pub peer_limit: Option<usize>,
+
     /// This is used to restore the session from serialized state.
     pub preferred_id: Option<usize>,
 
     #[serde(skip)]
     pub storage_factory: Option<BoxStorageFactory>,
-
-    // If true, will write to disk in separate threads. The downside is additional allocations.
-    // May be useful if the disk is slow.
-    pub defer_writes: Option<bool>,
 
     // Custom trackers
     pub trackers: Option<Vec<String>>,
@@ -425,10 +424,6 @@ pub struct SessionOptions {
     /// Options for connecting to peers (for outgiong connections).
     pub connect: Option<ConnectionOptions>,
 
-    // If you set this to something, all writes to disk will happen in background and be
-    // buffered in memory up to approximately the given number of megabytes.
-    pub defer_writes_up_to: Option<usize>,
-
     pub default_storage_factory: Option<BoxStorageFactory>,
 
     pub cancellation_token: Option<CancellationToken>,
@@ -451,11 +446,17 @@ pub struct SessionOptions {
     // The list of tracker URLs to always use for each torrent.
     pub trackers: HashSet<url::Url>,
 
+    /// Default peer limit per torrent.
+    pub peer_limit: Option<usize>,
+
     #[cfg(feature = "disable-upload")]
     pub disable_upload: bool,
 
     /// Disable LSD multicast
     pub disable_local_service_discovery: bool,
+
+    /// Force IPv4 only.
+    pub ipv4_only: bool,
 }
 
 fn torrent_file_from_info_bytes(info_bytes: &[u8], trackers: &[url::Url]) -> anyhow::Result<Bytes> {
@@ -629,16 +630,6 @@ impl Session {
                 .await
                 .context("error initializing session persistence store")?;
 
-            let (disk_write_tx, disk_write_rx) = opts
-                .defer_writes_up_to
-                .map(|mb| {
-                    const DISK_WRITE_APPROX_WORK_ITEM_SIZE: usize = CHUNK_SIZE as usize + 300;
-                    let count = mb * 1024 * 1024 / DISK_WRITE_APPROX_WORK_ITEM_SIZE;
-                    let (tx, rx) = tokio::sync::mpsc::channel(count);
-                    (Some(tx), Some(rx))
-                })
-                .unwrap_or_default();
-
             let proxy_url = opts.connect.as_ref().and_then(|s| s.proxy_url.as_ref());
             let proxy_config = match proxy_url {
                 Some(pu) => Some(
@@ -672,6 +663,7 @@ impl Session {
                     socks_proxy_config: proxy_config,
                     utp_socket: listen_result.as_ref().and_then(|l| l.utp_socket.clone()),
                     bind_device: bind_device.clone(),
+                    ipv4_only: opts.ipv4_only,
                 })
                 .await
                 .context("error creating stream connector")?,
@@ -732,7 +724,6 @@ impl Session {
                 cancellation_token: token,
                 announce_port: listen_result.as_ref().and_then(|l| l.announce_port),
                 listen_addr: listen_result.as_ref().map(|l| l.addr),
-                disk_write_tx,
                 default_storage_factory: opts.default_storage_factory,
                 reqwest_client,
                 connector: stream_connector,
@@ -743,8 +734,10 @@ impl Session {
                 )),
                 udp_tracker_client,
                 ratelimits: Limits::new(opts.ratelimits),
+                ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,
+                peer_limit: opts.peer_limit,
 
                 #[cfg(feature = "disable-upload")]
                 _disable_upload: opts.disable_upload,
@@ -752,20 +745,6 @@ impl Session {
                 allowlist,
                 lsd,
             });
-
-            if let Some(mut disk_write_rx) = disk_write_rx {
-                session.spawn(
-                    debug_span!(parent: session.rs(), "disk_writer"),
-                    "disk_writer",
-                    async move {
-                        while let Some(work) = disk_write_rx.recv().await {
-                            trace!(disk_write_rx_queue_len = disk_write_rx.len());
-                            spawner.block_in_place_with_semaphore(work).await;
-                        }
-                        Ok(())
-                    },
-                );
-            }
 
             if let Some(mut listen) = listen_result {
                 if let Some(tcp) = listen.tcp_socket.take() {
@@ -942,8 +921,9 @@ impl Session {
                     }
                 },
                 Some(Ok((live, checked))) = futs.next(), if !futs.is_empty() => {
+                    let (addr, kind) = (checked.addr, checked.kind);
                     if let Err(e) = live.add_incoming_peer(checked) {
-                        warn!("error handing over incoming connection: {e:#}");
+                        warn!(?addr, ?kind, "error handing over incoming connection: {e:#}");
                     }
                 },
             }
@@ -1290,9 +1270,9 @@ impl Session {
                     peer_read_write_timeout: peer_opts.read_write_timeout,
                     allow_overwrite: opts.overwrite,
                     output_folder,
-                    disk_write_queue: self.disk_write_tx.clone(),
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
+                    peer_limit: opts.peer_limit.or(self.peer_limit),
                     #[cfg(feature = "disable-upload")]
                     _disable_upload: self._disable_upload,
                 },

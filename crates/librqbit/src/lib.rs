@@ -63,11 +63,12 @@ mod listen;
 mod merge_streams;
 mod peer_connection;
 mod peer_info_reader;
+mod piece_tracker;
 mod read_buf;
 mod session;
 mod session_persistence;
 pub mod session_stats;
-mod spawn_utils;
+pub mod spawn_utils;
 
 pub mod storage;
 mod stream_connect;
@@ -85,7 +86,7 @@ pub use error::{Error, Result};
 
 pub use api::Api;
 pub use api_error::{ApiError, WithStatus, WithStatusError};
-pub use create_torrent_file::{CreateTorrentOptions, create_torrent};
+pub use create_torrent_file::{CreateTorrentOptions, CreateTorrentResult, create_torrent};
 pub use dht;
 pub use librqbit_core::spawn_utils::spawn as librqbit_spawn;
 pub use listen::{ListenerMode, ListenerOptions};
