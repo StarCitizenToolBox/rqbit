@@ -300,8 +300,13 @@ impl TorrentStateLive {
             let session_stats_for_callback = session_stats.clone();
             let on_bytes_received: crate::webseed::BytesReceivedCallback = Arc::new(move |bytes| {
                 use std::sync::atomic::Ordering;
-                stats_for_callback.fetched_bytes.fetch_add(bytes, Ordering::Relaxed);
-                session_stats_for_callback.counters.fetched_bytes.fetch_add(bytes, Ordering::Relaxed);
+                stats_for_callback
+                    .fetched_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
+                session_stats_for_callback
+                    .counters
+                    .fetched_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
             });
 
             // Create rate limiter callback that applies both torrent and session limits
@@ -608,7 +613,7 @@ impl TorrentStateLive {
                         continue;
                     }
 
-                    if g.inflight_pieces.contains_key(&piece) {
+                    if g.get_pieces()?.is_inflight(piece) {
                         continue;
                     }
 
@@ -656,7 +661,10 @@ impl TorrentStateLive {
                     wm.unmark_in_flight(piece_index);
 
                     match result {
-                        Ok(crate::webseed::WebSeedDownloadResult::Success { piece_index, data }) => {
+                        Ok(crate::webseed::WebSeedDownloadResult::Success {
+                            piece_index,
+                            data,
+                        }) => {
                             // Note: fetched_bytes is already updated via streaming callback during download
 
                             // Write the piece to disk
@@ -768,10 +776,10 @@ impl TorrentStateLive {
         // Update chunk tracker - just mark the piece as downloaded
         {
             let mut g = self.lock_write("webseed_piece_completed");
-            let chunks = g.get_chunks_mut()?;
+            let pieces = g.get_pieces_mut()?;
 
-            // Mark piece as have
-            chunks.mark_piece_downloaded(piece_index);
+            // Mark piece as have (mark_piece_hash_ok internally calls chunks.mark_piece_downloaded)
+            pieces.mark_piece_hash_ok(piece_index);
         }
 
         // Update stats (fetched_bytes is already updated via streaming callback for real-time speed)
@@ -781,7 +789,9 @@ impl TorrentStateLive {
         self.stats
             .downloaded_and_checked_pieces
             .fetch_add(1, Ordering::Relaxed);
-        self.stats.have_bytes.fetch_add(piece_len, Ordering::Relaxed);
+        self.stats
+            .have_bytes
+            .fetch_add(piece_len, Ordering::Relaxed);
 
         // Notify other components
         self.transmit_haves(piece_index);
@@ -790,7 +800,10 @@ impl TorrentStateLive {
         // Check if finished
         if self.is_finished() {
             self.finished_notify.notify_waiters();
-            info!(id = self.shared.id, "torrent download complete (via webseed)");
+            info!(
+                id = self.shared.id,
+                "torrent download complete (via webseed)"
+            );
         }
 
         debug!(
