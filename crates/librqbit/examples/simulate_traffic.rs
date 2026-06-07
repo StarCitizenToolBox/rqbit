@@ -160,8 +160,7 @@ impl TestHarness {
         let session = Session::new_with_opts(
             out.clone(),
             SessionOptions {
-                disable_dht: true,
-                disable_dht_persistence: true,
+                dht: None,
                 fastresume: false,
                 persistence: None,
                 peer_id: Some(peer_id),
@@ -173,6 +172,7 @@ impl TestHarness {
                     utp_opts: None,
                     announce_port: None,
                     ipv4_only: false,
+                    ..Default::default()
                 }),
                 ratelimits: LimitsConfig {
                     upload_bps: NonZero::new(64 * 1024),
@@ -252,8 +252,7 @@ impl TestHarness {
         let session = Session::new_with_opts(
             path.clone(),
             SessionOptions {
-                disable_dht: true,
-                disable_dht_persistence: true,
+                dht: None,
                 fastresume: false,
                 persistence: None,
                 peer_id: Some(peer_id),
@@ -265,6 +264,7 @@ impl TestHarness {
                     utp_opts: None,
                     announce_port: None,
                     ipv4_only: false,
+                    ..Default::default()
                 }),
                 disable_local_service_discovery: false,
                 connect: Some(ConnectionOptions {
@@ -337,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
         default_rust_log_value: Some("info"),
         log_file: Some(&log_file),
         log_file_rust_log: Some(log_file_rust_log.as_deref().unwrap_or("debug")),
+        log_file_json: false,
     })?;
 
     info!("logging to file: {}", log_file);

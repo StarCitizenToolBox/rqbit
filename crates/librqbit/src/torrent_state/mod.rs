@@ -196,6 +196,14 @@ pub struct ManagedTorrentShared {
 
     // "dn" from magnet link
     pub(crate) magnet_name: Option<String>,
+
+    pub(crate) client_name_and_version: String,
+}
+
+impl ManagedTorrentShared {
+    pub(crate) fn client_name_and_version(&self) -> &str {
+        &self.client_name_and_version
+    }
 }
 
 pub struct ManagedTorrent {
