@@ -14,7 +14,7 @@ members = [
     "crates/upnp",
     "crates/tracker_comms",
     "crates/upnp-serve",
-    "desktop/src-tauri",
+    # "desktop/src-tauri",
 ]
 
 # Everything except desktop
@@ -24,8 +24,6 @@ default-members = [
     "crates/buffers",
     "crates/clone_to_owned",
     "crates/bencode",
-    "crates/sha1w",
-    "crates/librqbit_core",
     "crates/peer_binary_protocol",
     "crates/dht",
     "crates/upnp",
@@ -77,7 +75,7 @@ async-compression = "0.4"
 async-stream = "0.3"
 async-trait = "0.1"
 atoi = "2"
-aws-lc-rs = "1.12"
+aws-lc-rs = "1.16.2"
 axum = "0.8"
 axum-extra = "0.10"
 backon = "1.5"
